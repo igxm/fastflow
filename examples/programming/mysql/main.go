@@ -1,16 +1,19 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"github.com/igxm/fastflow"
-	mongoKeeper "github.com/igxm/fastflow/keeper/mongo"
+	mysqlKeeper "github.com/igxm/fastflow/keeper/mysql"
+	"github.com/igxm/fastflow/pkg/entity"
 	"github.com/igxm/fastflow/pkg/entity/run"
 	"github.com/igxm/fastflow/pkg/mod"
-	mongoStore "github.com/igxm/fastflow/store/mongo"
+	"github.com/igxm/fastflow/pkg/utils/data"
+	mysqlStore "github.com/igxm/fastflow/store/mysql"
 )
 
 type PrintAction struct {
@@ -32,23 +35,21 @@ func main() {
 	})
 
 	// init keeper, it used to e
-	keeper := mongoKeeper.NewKeeper(&mongoKeeper.KeeperOption{
+	keeper := mysqlKeeper.NewKeeper(&mysqlKeeper.KeeperOption{
 		Key: "worker-1",
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  os.Getenv("MongoUri"),
-		Database: "mongo-demo",
-		Prefix:   "test",
+		Dsn:    os.Getenv("MYSQL_DSN"),
+		Prefix: "",
 	})
 	if err := keeper.Init(); err != nil {
 		log.Fatal(fmt.Errorf("init keeper failed: %w", err))
 	}
 
 	// init store
-	st := mongoStore.NewStore(&mongoStore.StoreOption{
+	st := mysqlStore.NewStore(&mysqlStore.StoreOption{
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  os.Getenv("MongoUri"),
-		Database: "mongo-demo",
-		Prefix:   "test",
+		Dsn:    os.Getenv("MYSQL_DSN"),
+		Prefix: "",
 	})
 	if err := st.Init(); err != nil {
 		log.Fatal(fmt.Errorf("init store failed: %w", err))
@@ -60,8 +61,6 @@ func main() {
 	if err := fastflow.Start(&fastflow.InitialOption{
 		Keeper: keeper,
 		Store:  st,
-		// use yaml to define dag
-		ReadDagFromDir: "./",
 	}); err != nil {
 		panic(fmt.Sprintf("init fastflow failed: %s", err))
 	}
@@ -71,12 +70,47 @@ func createDagAndInstance() {
 	// wait fast start completed
 	time.Sleep(time.Second)
 
+	// create a dag as template
+	dag := &entity.Dag{
+		BaseInfo: entity.BaseInfo{
+			ID: "test-dag",
+		},
+		Status: entity.DagStatusNormal,
+		Name:   "test",
+		Tasks: []entity.Task{
+			{ID: "task1", ActionName: "PrintAction"},
+			{ID: "task2", ActionName: "PrintAction", DependOn: []string{"task1"}},
+			{ID: "task3", ActionName: "PrintAction", DependOn: []string{"task2"}},
+		},
+	}
+	if err := ensureDagCreated(dag); err != nil {
+		log.Fatalf(err.Error())
+	}
+
 	// run some dag instance
 	for i := 0; i < 10; i++ {
-		_, err := mod.GetCommander().RunDag("test-dag", nil)
+		dagInstance, err := dag.Run(entity.TriggerManually, nil)
 		if err != nil {
+			log.Fatal(err)
+		}
+		if err := mod.GetStore().CreateDagIns(dagInstance); err != nil {
 			log.Fatal(err)
 		}
 		time.Sleep(time.Second * 10)
 	}
+}
+
+func ensureDagCreated(dag *entity.Dag) error {
+	oldDag, err := mod.GetStore().GetDag(dag.ID)
+	if errors.Is(err, data.ErrDataNotFound) {
+		if err := mod.GetStore().CreateDag(dag); err != nil {
+			return err
+		}
+	}
+	if oldDag != nil {
+		if err := mod.GetStore().UpdateDag(dag); err != nil {
+			return err
+		}
+	}
+	return nil
 }

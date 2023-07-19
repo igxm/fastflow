@@ -4,15 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
-	"github.com/shiningrush/fastflow"
-	mongoKeeper "github.com/shiningrush/fastflow/keeper/mongo"
-	"github.com/shiningrush/fastflow/pkg/entity"
-	"github.com/shiningrush/fastflow/pkg/entity/run"
-	"github.com/shiningrush/fastflow/pkg/mod"
-	"github.com/shiningrush/fastflow/pkg/utils/data"
-	mongoStore "github.com/shiningrush/fastflow/store/mongo"
+	"github.com/igxm/fastflow"
+	mongoKeeper "github.com/igxm/fastflow/keeper/mongo"
+	"github.com/igxm/fastflow/pkg/entity"
+	"github.com/igxm/fastflow/pkg/entity/run"
+	"github.com/igxm/fastflow/pkg/mod"
+	"github.com/igxm/fastflow/pkg/utils/data"
+	mongoStore "github.com/igxm/fastflow/store/mongo"
 )
 
 type PrintAction struct {
@@ -37,7 +38,7 @@ func main() {
 	keeper := mongoKeeper.NewKeeper(&mongoKeeper.KeeperOption{
 		Key: "worker-1",
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  "mongodb://root:pwd@127.0.0.1:27017/fastflow?authSource=admin",
+		ConnStr:  os.Getenv("MongoUri"),
 		Database: "mongo-demo",
 		Prefix:   "test",
 	})
@@ -48,7 +49,7 @@ func main() {
 	// init store
 	st := mongoStore.NewStore(&mongoStore.StoreOption{
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  "mongodb://root:pwd@127.0.0.1:27017/fastflow?authSource=admin",
+		ConnStr:  os.Getenv("MongoUri"),
 		Database: "mongo-demo",
 		Prefix:   "test",
 	})

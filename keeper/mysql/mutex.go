@@ -1,4 +1,4 @@
-package mongo
+package mysql
 
 import (
 	"context"
@@ -7,21 +7,20 @@ import (
 
 	"github.com/igxm/fastflow/pkg/mod"
 	"github.com/igxm/fastflow/pkg/utils/data"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	"gorm.io/gorm"
 )
 
 type LockDetail struct {
-	Key       string    `bson:"_id"`
-	ExpiredAt time.Time `bson:"expiredAt"`
-	Identity  string    `bson:"identity"`
+	Key       string    `gorm:"column:id" json:"id"`
+	ExpiredAt time.Time `json:"expired_at"`
+	Identity  string    `json:"identity"`
 }
 
 type MongoMutex struct {
 	key string
 
 	clsName    string
-	mongoDb    *mongo.Database
+	db         *gorm.DB
 	lockDetail *LockDetail
 }
 
@@ -56,21 +55,21 @@ func (m *MongoMutex) Lock(ctx context.Context, ops ...mod.LockOptionOp) error {
 
 func (m *MongoMutex) spinLock(ctx context.Context, opt *mod.LockOption) error {
 	detail := LockDetail{}
-	err := m.mongoDb.Collection(m.clsName).FindOne(ctx, bson.M{"_id": m.key}).Decode(&detail)
-	if err != nil && err != mongo.ErrNoDocuments {
+	err := m.db.Table(m.clsName).Where("id = ?", m.key).First(&detail).Error
+	if err != nil && err != gorm.ErrRecordNotFound {
 		return fmt.Errorf("get lock detail failed: %w", err)
 	}
 
 	// no lock
-	if err == mongo.ErrNoDocuments {
+	if err == gorm.ErrRecordNotFound {
 		d := &LockDetail{
 			Key:       m.key,
 			ExpiredAt: time.Now().Add(opt.TTL),
 			Identity:  opt.ReentrantIdentity,
 		}
-		_, err := m.mongoDb.Collection(m.clsName).InsertOne(ctx, d)
+		err := m.db.Table(m.clsName).Create(d).Error
 		if err != nil {
-			if mongo.IsDuplicateKeyError(err) {
+			if err == gorm.ErrPrimaryKeyRequired {
 				// race lock failed, ready to get lock next time
 				return nil
 			}
@@ -83,17 +82,15 @@ func (m *MongoMutex) spinLock(ctx context.Context, opt *mod.LockOption) error {
 	// lock existed, we should check it is expired
 	if detail.ExpiredAt.Before(time.Now()) {
 		exp := time.Now().Add(opt.TTL)
-		ret, err := m.mongoDb.Collection(m.clsName).UpdateOne(ctx, bson.M{"_id": m.key, "expiredAt": detail.ExpiredAt}, bson.M{
-			"$set": bson.M{
-				"expiredAt": time.Now().Add(opt.TTL),
-				"identity":  opt.ReentrantIdentity,
-			},
+		ret := m.db.Table(m.clsName).Where("id = ? and expired_at = ?", m.key, detail.ExpiredAt).Updates(map[string]any{
+			"expired_at": time.Now().Add(opt.TTL),
+			"identity":   opt.ReentrantIdentity,
 		})
-		if err != nil {
-			return fmt.Errorf("get lock failed: %w", err)
+		if ret.Error != nil {
+			return fmt.Errorf("get lock failed: %w", ret.Error)
 		}
 		// lock is keep by others
-		if ret.ModifiedCount == 0 {
+		if ret.RowsAffected == 0 {
 			return nil
 		}
 		detail.ExpiredAt = exp
@@ -116,12 +113,12 @@ func (m *MongoMutex) Unlock(ctx context.Context) error {
 		return fmt.Errorf("the mutex is not locked")
 	}
 
-	ret, err := m.mongoDb.Collection(m.clsName).DeleteOne(ctx, bson.M{"_id": m.key, "expiredAt": m.lockDetail.ExpiredAt})
-	if err != nil {
-		return fmt.Errorf("delete lock detail failed: %w", err)
+	ret := m.db.Exec(fmt.Sprintf("delete from %s where id = ? and expired_at =?", m.clsName), m.key, m.lockDetail.ExpiredAt)
+	if ret.Error != nil {
+		return fmt.Errorf("delete lock detail failed: %w", ret.Error)
 	}
 
-	if ret.DeletedCount == 0 {
+	if ret.RowsAffected == 0 {
 		return data.ErrMutexAlreadyUnlock
 	}
 	m.lockDetail = nil

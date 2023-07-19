@@ -1,14 +1,15 @@
 package entity
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/shiningrush/fastflow/pkg/log"
-	"github.com/shiningrush/fastflow/pkg/utils"
-	"github.com/shiningrush/fastflow/pkg/utils/value"
+	"github.com/igxm/fastflow/pkg/log"
+	"github.com/igxm/fastflow/pkg/utils"
+	"github.com/igxm/fastflow/pkg/utils/value"
 )
 
 // NewDag new a dag
@@ -26,7 +27,7 @@ type Dag struct {
 	Cron     string    `yaml:"cron,omitempty" json:"cron,omitempty" bson:"cron,omitempty"`
 	Vars     DagVars   `yaml:"vars,omitempty" json:"vars,omitempty" bson:"vars,omitempty"`
 	Status   DagStatus `yaml:"status,omitempty" json:"status,omitempty" bson:"status,omitempty"`
-	Tasks    []Task    `yaml:"tasks,omitempty" json:"tasks,omitempty" bson:"tasks,omitempty"`
+	Tasks    Tasks     `yaml:"tasks,omitempty" json:"tasks,omitempty" bson:"tasks,omitempty"`
 }
 
 // SpecifiedVar
@@ -69,6 +70,25 @@ type DagVar struct {
 	DefaultValue string `yaml:"defaultValue,omitempty" json:"defaultValue,omitempty" bson:"defaultValue,omitempty"`
 }
 
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Jsonb
+func (d *DagVars) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	b, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("value is not []byte, value: %v", value)
+	}
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 json value
+func (d DagVars) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
+
 // DagInstanceVar
 type DagInstanceVar struct {
 	Value string `json:"value,omitempty" bson:"value,omitempty"`
@@ -85,7 +105,7 @@ const (
 // DagInstance
 type DagInstance struct {
 	BaseInfo  `bson:"inline"`
-	DagID     string            `json:"dagId,omitempty" bson:"dagId,omitempty"`
+	DagID     string            `json:"dagId,omitempty" bson:"dagId,omitempty" gorm:"column:dag_id"`
 	Trigger   Trigger           `json:"trigger,omitempty" bson:"trigger,omitempty"`
 	Worker    string            `json:"worker,omitempty" bson:"worker,omitempty"`
 	Vars      DagInstanceVars   `json:"vars,omitempty" bson:"vars,omitempty"`
@@ -108,6 +128,28 @@ type ShareData struct {
 	Save func(data *ShareData) error
 
 	mutex sync.Mutex
+}
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Jsonb
+func (d *ShareData) Scan(value interface{}) error {
+	b, _ := value.([]byte)
+
+	if d.Dict == nil {
+		d.Dict = make(map[string]string)
+	}
+	return json.Unmarshal(b, &d.Dict)
+
+	// return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 json value
+func (d *ShareData) Value() (driver.Value, error) {
+	if d == nil {
+		d = &ShareData{
+			Dict: make(map[string]string),
+		}
+	}
+	return json.Marshal(d.Dict)
 }
 
 // MarshalBSON used by mongo
@@ -152,6 +194,9 @@ func (d *ShareData) Get(key string) (string, bool) {
 func (d *ShareData) Set(key string, val string) {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
+	if d.Dict == nil {
+		d.Dict = make(map[string]string)
+	}
 	d.Dict[key] = val
 	if d.Save != nil {
 		if err := d.Save(d); err != nil {
@@ -166,6 +211,25 @@ func (d *ShareData) Set(key string, val string) {
 
 // DagInstanceVars
 type DagInstanceVars map[string]DagInstanceVar
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Jsonb
+func (d *DagInstanceVars) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	b, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("value is not []byte, value: %v", value)
+	}
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 json value
+func (d DagInstanceVars) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
 
 // Cancel a task, it is just set a command, command will execute by Parser
 func (dagIns *DagInstance) Cancel(taskInsIds []string) error {
@@ -284,6 +348,25 @@ func (vars DagInstanceVars) Render(p map[string]interface{}) (map[string]interfa
 type Command struct {
 	Name             CommandName
 	TargetTaskInsIDs []string
+}
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Jsonb
+func (d *Command) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	b, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("value is not []byte, value: %v", value)
+	}
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 json value
+func (d Command) Value() (driver.Value, error) {
+	return json.Marshal(d)
 }
 
 // CommandName

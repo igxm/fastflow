@@ -5,7 +5,7 @@ package run
 import (
 	context "context"
 
-	"github.com/shiningrush/fastflow/pkg/utils"
+	"github.com/igxm/fastflow/pkg/utils"
 
 	mock "github.com/stretchr/testify/mock"
 )

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shiningrush/fastflow/pkg/entity"
-	"github.com/shiningrush/fastflow/pkg/mod"
+	"github.com/igxm/fastflow/pkg/entity"
+	"github.com/igxm/fastflow/pkg/mod"
 	"github.com/stretchr/testify/assert"
 )
 

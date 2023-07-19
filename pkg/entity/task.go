@@ -1,14 +1,32 @@
 package entity
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"time"
 
-	"github.com/shiningrush/fastflow/pkg/entity/run"
-	"github.com/shiningrush/fastflow/pkg/log"
-	"github.com/shiningrush/fastflow/pkg/utils"
+	"github.com/igxm/fastflow/pkg/entity/run"
+	"github.com/igxm/fastflow/pkg/log"
+	"github.com/igxm/fastflow/pkg/utils"
+	"gorm.io/datatypes"
 )
+
+type Tasks []Task
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Tasks
+func (d *Tasks) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Tasks value
+func (d Tasks) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
 
 // Task
 type Task struct {
@@ -19,6 +37,19 @@ type Task struct {
 	TimeoutSecs int                    `yaml:"timeoutSecs,omitempty" json:"timeoutSecs,omitempty"  bson:"timeoutSecs,omitempty"`
 	Params      map[string]interface{} `yaml:"params,omitempty" json:"params,omitempty"  bson:"params,omitempty"`
 	PreChecks   PreChecks              `yaml:"preCheck,omitempty" json:"preCheck,omitempty"  bson:"preCheck,omitempty"`
+}
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Task
+func (d *Task) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Task value
+func (d Task) Value() (driver.Value, error) {
+	return json.Marshal(d)
 }
 
 // GetGraphID
@@ -43,10 +74,36 @@ func (t *Task) GetStatus() TaskInstanceStatus {
 
 type PreChecks map[string]*Check
 
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Task
+func (d *PreChecks) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Task value
+func (d PreChecks) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
+
 // Check
 type Check struct {
 	Conditions []TaskCondition `yaml:"conditions,omitempty" json:"conditions,omitempty"  bson:"conditions,omitempty"`
 	Act        ActiveAction    `yaml:"act,omitempty" json:"act,omitempty"  bson:"act,omitempty"`
+}
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Task
+func (d *Check) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Task value
+func (d Check) Value() (driver.Value, error) {
+	return json.Marshal(d)
 }
 
 // IsMeet return if check is meet
@@ -130,29 +187,59 @@ func isStrInArray(str string, arr []string) bool {
 	return false
 }
 
+type DependOns []string
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Tasks
+func (d *DependOns) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Tasks value
+func (d DependOns) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
+
+type TraceInfos []TraceInfo
+
+// 实现 sql.Scanner 接口，Scan 将 value 扫描至 Tasks
+func (d *TraceInfos) Scan(value interface{}) error {
+
+	b, _ := value.([]byte)
+
+	return json.Unmarshal(b, &d)
+}
+
+// 实现 driver.Valuer 接口，Value 返回 Tasks value
+func (d TraceInfos) Value() (driver.Value, error) {
+	return json.Marshal(d)
+}
+
 // TaskInstance
 type TaskInstance struct {
 	BaseInfo `bson:"inline"`
 	// Task's Id it should be unique in a dag instance
-	TaskID      string                 `json:"taskId,omitempty" bson:"taskId,omitempty"`
-	DagInsID    string                 `json:"dagInsId,omitempty" bson:"dagInsId,omitempty"`
-	Name        string                 `json:"name,omitempty" bson:"name,omitempty"`
-	DependOn    []string               `json:"dependOn,omitempty" bson:"dependOn,omitempty"`
-	ActionName  string                 `json:"actionName,omitempty" bson:"actionName,omitempty"`
-	TimeoutSecs int                    `json:"timeoutSecs" bson:"timeoutSecs"`
-	Params      map[string]interface{} `json:"params,omitempty" bson:"params,omitempty"`
-	Traces      []TraceInfo            `json:"traces,omitempty" bson:"traces,omitempty"`
-	Status      TaskInstanceStatus     `json:"status,omitempty" bson:"status,omitempty"`
-	Reason      string                 `json:"reason,omitempty" bson:"reason,omitempty"`
-	PreChecks   PreChecks              `json:"preChecks,omitempty"  bson:"preChecks,omitempty"`
+	TaskID      string             `json:"taskId,omitempty" bson:"taskId,omitempty"`
+	DagInsID    string             `json:"dagInsId,omitempty" bson:"dagInsId,omitempty"`
+	Name        string             `json:"name,omitempty" bson:"name,omitempty"`
+	DependOn    DependOns          `json:"dependOn,omitempty" bson:"dependOn,omitempty"`
+	ActionName  string             `json:"actionName,omitempty" bson:"actionName,omitempty"`
+	TimeoutSecs int                `json:"timeoutSecs" bson:"timeoutSecs"`
+	Params      datatypes.JSONMap  `json:"params,omitempty" bson:"params,omitempty"`
+	Traces      TraceInfos         `json:"traces,omitempty" bson:"traces,omitempty"`
+	Status      TaskInstanceStatus `json:"status,omitempty" bson:"status,omitempty"`
+	Reason      string             `json:"reason,omitempty" bson:"reason,omitempty"`
+	PreChecks   PreChecks          `json:"preChecks,omitempty"  bson:"preChecks,omitempty"`
 
 	// used to save changes
-	Patch              func(*TaskInstance) error `json:"-" bson:"-"`
-	Context            run.ExecuteContext        `json:"-" bson:"-"`
-	RelatedDagInstance *DagInstance              `json:"-" bson:"-"`
+	Patch              func(*TaskInstance) error `json:"-" bson:"-" gorm:"-"`
+	Context            run.ExecuteContext        `json:"-" bson:"-" gorm:"-"`
+	RelatedDagInstance *DagInstance              `json:"-" bson:"-" gorm:"-"`
 
 	// it used to buffer traces, and persist when status changed
-	bufTraces []TraceInfo
+	bufTraces []TraceInfo `gorm:"-"`
 }
 
 // TraceInfo

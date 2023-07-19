@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shiningrush/fastflow/pkg/entity"
-	"github.com/shiningrush/fastflow/pkg/entity/run"
-	"github.com/shiningrush/fastflow/pkg/render"
+	"github.com/igxm/fastflow/pkg/entity"
+	"github.com/igxm/fastflow/pkg/entity/run"
+	"github.com/igxm/fastflow/pkg/render"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"gopkg.in/yaml.v3"

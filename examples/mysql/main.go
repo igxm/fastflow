@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,13 +8,12 @@ import (
 	"time"
 
 	"github.com/igxm/fastflow"
-	mongoKeeper "github.com/igxm/fastflow/keeper/mongo"
+	mysqlKeeper "github.com/igxm/fastflow/keeper/mysql"
 	"github.com/igxm/fastflow/pkg/entity"
 	"github.com/igxm/fastflow/pkg/entity/run"
 	"github.com/igxm/fastflow/pkg/exporter"
 	"github.com/igxm/fastflow/pkg/mod"
-	"github.com/igxm/fastflow/pkg/utils/data"
-	mongoStore "github.com/igxm/fastflow/store/mongo"
+	mysqlStore "github.com/igxm/fastflow/store/mysql"
 )
 
 type ActionParam struct {
@@ -87,7 +85,12 @@ func ensureDagCreated() error {
 		},
 	}
 	oldDag, err := mod.GetStore().GetDag(dag.ID)
-	if errors.Is(err, data.ErrDataNotFound) {
+
+	if err != nil {
+		return err
+	}
+
+	if oldDag.BaseInfo.ID == "" {
 		if err := mod.GetStore().CreateDag(dag); err != nil {
 			return err
 		}
@@ -109,23 +112,22 @@ func main() {
 		&ActionA{code: "D"},
 	})
 	// init keeper
-	keeper := mongoKeeper.NewKeeper(&mongoKeeper.KeeperOption{
+	keeper := mysqlKeeper.NewKeeper(&mysqlKeeper.KeeperOption{
 		Key: "worker-1",
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  os.Getenv("MongoUri"),
-		Database: "mongo-demo",
-		Prefix:   "test",
+		Dsn: os.Getenv("MYSQL_DSN"),
+
+		Prefix: "",
 	})
 	if err := keeper.Init(); err != nil {
 		log.Fatal(fmt.Errorf("init keeper failed: %w", err))
 	}
 
 	// init store
-	st := mongoStore.NewStore(&mongoStore.StoreOption{
+	st := mysqlStore.NewStore(&mysqlStore.StoreOption{
 		// if your mongo does not set user/pwd, you should remove it
-		ConnStr:  os.Getenv("MongoUri"),
-		Database: "mongo-demo",
-		Prefix:   "test",
+		Dsn:    os.Getenv("MYSQL_DSN"),
+		Prefix: "",
 	})
 	if err := st.Init(); err != nil {
 		log.Fatal(fmt.Errorf("init store failed: %w", err))

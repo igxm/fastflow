@@ -1,45 +1,41 @@
-package mongo
+package mysql
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/igxm/fastflow/pkg/entity"
 	"github.com/igxm/fastflow/pkg/event"
-	"github.com/igxm/fastflow/pkg/log"
 	"github.com/igxm/fastflow/pkg/mod"
 	"github.com/igxm/fastflow/pkg/utils"
 	"github.com/igxm/fastflow/pkg/utils/data"
 	"github.com/shiningrush/goevent"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
-// StoreOption
 type StoreOption struct {
-	// mongo connection string
-	ConnStr  string
-	Database string
-	// Timeout access mongo timeout.default 5s
+	Db *gorm.DB
+	// mysql connection settings
+	Dsn string
+
+	// timeout access mysql timeout.default 5s
 	Timeout time.Duration
-	// the prefix will append to the database
+	// table the prefix
 	Prefix string
 }
 
-// Store
 type Store struct {
 	opt            *StoreOption
 	dagClsName     string
 	dagInsClsName  string
 	taskInsClsName string
 
-	mongoClient *mongo.Client
-	mongoDb     *mongo.Database
+	db *gorm.DB
 }
 
 // NewStore
@@ -49,35 +45,41 @@ func NewStore(option *StoreOption) *Store {
 	}
 }
 
-// Init store
+// Init Store
 func (s *Store) Init() error {
 	if err := s.readOpt(); err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.opt.Timeout)
-	defer cancel()
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(s.opt.ConnStr))
-	if err != nil {
-		return fmt.Errorf("connect client failed: %w", err)
+	if s.opt.Db == nil {
+
+		mysqlConfig := mysql.Config{
+			DSN:                       s.opt.Dsn, // DSN data source name
+			DisableDatetimePrecision:  true,      // 禁用 datetime 精度，MySQL 5.6 之前的数据库不支持
+			SkipInitializeWithVersion: false,     // 根据版本自动配置
+		}
+
+		db, err := gorm.Open(mysql.New(mysqlConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		if err != nil {
+			return err
+		}
+		s.db = db
+	} else {
+		s.db = s.opt.Db
 	}
-	err = client.Ping(ctx, readpref.Primary())
-	if err != nil {
-		return fmt.Errorf("ping client failed: %w", err)
-	}
-	s.mongoClient = client
-	s.mongoDb = s.mongoClient.Database(s.opt.Database)
 
 	return nil
 }
 
 func (s *Store) readOpt() error {
-	if s.opt.ConnStr == "" {
-		return fmt.Errorf("connect string cannot be empty")
+	if s.opt.Db == nil {
+		if s.opt.Dsn == "" {
+			return fmt.Errorf("Dsn string cannot be empty")
+		}
 	}
-	if s.opt.Database == "" {
-		s.opt.Database = "fastflow"
-	}
+
 	if s.opt.Timeout == 0 {
 		s.opt.Timeout = 5 * time.Second
 	}
@@ -95,12 +97,7 @@ func (s *Store) readOpt() error {
 
 // Close component when we not use it anymore
 func (s *Store) Close() {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
-
-	if err := s.mongoClient.Disconnect(ctx); err != nil {
-		log.Errorf("close store client failed: %s", err)
-	}
+	return
 }
 
 // CreateDag
@@ -110,6 +107,7 @@ func (s *Store) CreateDag(dag *entity.Dag) error {
 	if err != nil {
 		return err
 	}
+
 	return s.genericCreate(dag, s.dagClsName)
 }
 
@@ -130,13 +128,10 @@ func (s *Store) genericCreate(input entity.BaseInfoGetter, clsName string) error
 	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
 	defer cancel()
 
-	if _, err := s.mongoDb.Collection(clsName).InsertOne(ctx, input); err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("%s key[ %s ] already existed: %w", clsName, baseInfo.ID, data.ErrDataConflicted)
-		}
-
+	if err := s.db.WithContext(ctx).Table(clsName).Create(input).Error; err != nil {
 		return fmt.Errorf("insert instance failed: %w", err)
 	}
+
 	return nil
 }
 
@@ -147,7 +142,7 @@ func (s *Store) BatchCreatTaskIns(taskIns []*entity.TaskInstance) error {
 
 	for i := range taskIns {
 		taskIns[i].Initial()
-		if _, err := s.mongoDb.Collection(s.taskInsClsName).InsertOne(ctx, taskIns[i]); err != nil {
+		if err := s.db.WithContext(ctx).Table(s.taskInsClsName).Create(taskIns[i]).Error; err != nil {
 			return fmt.Errorf("insert task instance failed: %w", err)
 		}
 	}
@@ -159,8 +154,9 @@ func (s *Store) PatchTaskIns(taskIns *entity.TaskInstance) error {
 	if taskIns.ID == "" {
 		return fmt.Errorf("id cannot be empty")
 	}
-	update := bson.M{
-		"updatedAt": time.Now().Unix(),
+
+	update := map[string]any{
+		"updated_at": time.Now().Unix(),
 	}
 	if taskIns.Status != "" {
 		update["status"] = taskIns.Status
@@ -171,26 +167,22 @@ func (s *Store) PatchTaskIns(taskIns *entity.TaskInstance) error {
 	if len(taskIns.Traces) > 0 {
 		update["traces"] = taskIns.Traces
 	}
-	update = bson.M{
-		"$set": update,
-	}
 
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
-	if _, err := s.mongoDb.Collection(s.taskInsClsName).UpdateOne(ctx, bson.M{"_id": taskIns.ID}, update); err != nil {
+	if err := s.db.Table(s.taskInsClsName).Where("id = ?", taskIns.ID).Updates(update).Error; err != nil {
 		return fmt.Errorf("patch task instance failed: %w", err)
 	}
+
 	return nil
 }
 
 // PatchDagIns
 func (s *Store) PatchDagIns(dagIns *entity.DagInstance, mustsPatchFields ...string) error {
-	update := bson.M{
-		"updatedAt": time.Now().Unix(),
+	update := map[string]any{
+		"updated_at": time.Now().Unix(),
 	}
 
 	if dagIns.ShareData != nil {
-		update["shareData"] = dagIns.ShareData
+		update["share_data"] = dagIns.ShareData
 	}
 	if dagIns.Status != "" {
 		update["status"] = dagIns.Status
@@ -205,13 +197,7 @@ func (s *Store) PatchDagIns(dagIns *entity.DagInstance, mustsPatchFields ...stri
 		update["reason"] = dagIns.Reason
 	}
 
-	update = bson.M{
-		"$set": update,
-	}
-
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
-	if _, err := s.mongoDb.Collection(s.dagInsClsName).UpdateOne(ctx, bson.M{"_id": dagIns.ID}, update); err != nil {
+	if err := s.db.Table(s.dagInsClsName).Where("id = ?", dagIns.ID).Updates(update).Error; err != nil {
 		return fmt.Errorf("patch dag instance failed: %w", err)
 	}
 
@@ -229,12 +215,33 @@ func (s *Store) UpdateDag(dag *entity.Dag) error {
 	if err != nil {
 		return err
 	}
-	return s.genericUpdate(dag, s.dagClsName)
+
+	values := make(map[string]any)
+	values["updated_at"] = time.Now().Unix()
+	values["name"] = dag.Name
+	values["desc"] = dag.Desc
+	values["cron"] = dag.Cron
+	values["vars"] = dag.Vars
+	values["status"] = dag.Status
+	values["tasks"] = dag.Tasks
+
+	return s.genericUpdate(dag.ID, values, s.dagClsName)
 }
 
 // UpdateDagIns
 func (s *Store) UpdateDagIns(dagIns *entity.DagInstance) error {
-	if err := s.genericUpdate(dagIns, s.dagInsClsName); err != nil {
+	values := make(map[string]any)
+	values["updated_at"] = time.Now().Unix()
+	values["dag_id"] = dagIns.DagID
+	values["trigger"] = dagIns.Trigger
+	values["worker"] = dagIns.Worker
+	values["vars"] = dagIns.Vars
+	values["share_data"] = dagIns.ShareData
+	values["status"] = dagIns.Status
+	values["reason"] = dagIns.Reason
+	values["cmd"] = dagIns.Cmd
+
+	if err := s.genericUpdate(dagIns.ID, values, s.dagInsClsName); err != nil {
 		return err
 	}
 
@@ -244,30 +251,36 @@ func (s *Store) UpdateDagIns(dagIns *entity.DagInstance) error {
 
 // UpdateTaskIns
 func (s *Store) UpdateTaskIns(taskIns *entity.TaskInstance) error {
-	return s.genericUpdate(taskIns, s.taskInsClsName)
+	values := make(map[string]any)
+	values["updated_at"] = time.Now().Unix()
+	values["task_id"] = taskIns.TaskID
+	values["dag_ins_id"] = taskIns.DagInsID
+	values["name"] = taskIns.Name
+	values["depend_on"] = taskIns.DependOn
+	values["action_name"] = taskIns.ActionName
+	values["timeout_secs"] = taskIns.TimeoutSecs
+	values["params"] = taskIns.Params
+	values["traces"] = taskIns.Traces
+	values["status"] = taskIns.Status
+	values["reason"] = taskIns.Reason
+	values["pre_checks"] = taskIns.PreChecks
+
+	return s.genericUpdate(taskIns.ID, values, s.taskInsClsName)
 }
 
 // genericUpdate
-func (s *Store) genericUpdate(input entity.BaseInfoGetter, clsName string) error {
-	baseInfo := input.GetBaseInfo()
-	baseInfo.Update()
+func (s *Store) genericUpdate(id string, values map[string]any, clsName string) error {
 
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
-	ret, err := s.mongoDb.Collection(clsName).ReplaceOne(ctx, bson.M{"_id": baseInfo.ID}, input)
+	err := s.db.Table(clsName).Where("id = ?", id).Updates(values).Error
 	if err != nil {
 		return fmt.Errorf("update dag instance failed: %w", err)
 	}
-	if ret.MatchedCount == 0 {
-		return fmt.Errorf("%s has no key[ %s ] to update: %w", clsName, baseInfo.ID, data.ErrDataNotFound)
-	}
+
 	return nil
 }
 
 // BatchUpdateDagIns
 func (s *Store) BatchUpdateDagIns(dagIns []*entity.DagInstance) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
 
 	errChan := make(chan error)
 	defer close(errChan)
@@ -283,10 +296,7 @@ func (s *Store) BatchUpdateDagIns(dagIns []*entity.DagInstance) error {
 	for i := range dagIns {
 		wg.Add(1)
 		go func(dag *entity.DagInstance, ch chan error) {
-			dag.Update()
-			if _, err := s.mongoDb.Collection(s.dagInsClsName).ReplaceOne(
-				ctx,
-				bson.M{"_id": dag.ID}, dag); err != nil {
+			if err := s.UpdateDagIns(dag); err != nil {
 				errChan <- fmt.Errorf("batch update dag instance failed: %w", err)
 			}
 			wg.Done()
@@ -298,13 +308,9 @@ func (s *Store) BatchUpdateDagIns(dagIns []*entity.DagInstance) error {
 
 // BatchUpdateTaskIns
 func (s *Store) BatchUpdateTaskIns(taskIns []*entity.TaskInstance) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
+
 	for i := range taskIns {
-		taskIns[i].Update()
-		if _, err := s.mongoDb.Collection(s.taskInsClsName).ReplaceOne(
-			ctx,
-			bson.M{"_id": taskIns[i].ID}, taskIns[i]); err != nil {
+		if err := s.UpdateTaskIns(taskIns[i]); err != nil {
 			return fmt.Errorf("batch update task instance failed: %w", err)
 		}
 	}
@@ -342,13 +348,8 @@ func (s *Store) GetDagInstance(dagInsId string) (*entity.DagInstance, error) {
 }
 
 func (s *Store) genericGet(clsName, id string, ret interface{}) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
 
-	if err := s.mongoDb.Collection(clsName).FindOne(ctx, bson.M{"_id": id}).Decode(ret); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return fmt.Errorf("%s key[ %s ] not found: %w", clsName, id, data.ErrDataNotFound)
-		}
+	if err := s.db.Table(clsName).Where("id = ?", id).Scan(ret).Error; err != nil {
 		return fmt.Errorf("get dag instance failed: %w", err)
 	}
 
@@ -357,10 +358,9 @@ func (s *Store) genericGet(clsName, id string, ret interface{}) error {
 
 // ListDag
 func (s *Store) ListDag(input *mod.ListDagInput) ([]*entity.Dag, error) {
-	query := bson.M{}
 
 	var ret []*entity.Dag
-	err := s.genericList(&ret, s.dagClsName, query)
+	err := s.db.Table(s.dagClsName).Find(&ret).Error
 	if err != nil {
 		return nil, err
 	}
@@ -369,32 +369,33 @@ func (s *Store) ListDag(input *mod.ListDagInput) ([]*entity.Dag, error) {
 
 // ListDagInstance
 func (s *Store) ListDagInstance(input *mod.ListDagInstanceInput) ([]*entity.DagInstance, error) {
-	query := bson.M{}
+	db := s.db.Table(s.dagInsClsName)
 	if len(input.Status) > 0 {
-		query["status"] = bson.M{
-			"$in": input.Status,
-		}
+		db = db.Where("status in ?", input.Status)
 	}
+
 	if input.Worker != "" {
-		query["worker"] = input.Worker
+		db = db.Where("worker = ?", input.Worker)
 	}
+
 	if input.UpdatedEnd > 0 {
-		query["updatedAt"] = bson.M{
-			"$lte": input.UpdatedEnd,
-		}
+		db = db.Where("updated_at <= ?", input.UpdatedEnd)
 	}
 	if input.HasCmd {
-		query["cmd"] = bson.M{
-			"$ne": nil,
-		}
+		db = db.Where("cmd is not null")
 	}
-	opt := &options.FindOptions{}
+
 	if input.Limit > 0 {
-		opt.Limit = &input.Limit
+		offset := input.Offset
+		if offset > 0 {
+			offset = (offset - 1) * input.Limit
+
+		}
+		db = db.Offset(int(offset)).Limit(int(input.Limit))
 	}
 
 	var ret []*entity.DagInstance
-	err := s.genericList(&ret, s.dagInsClsName, query, opt)
+	err := db.Find(&ret).Error
 	if err != nil {
 		return nil, err
 	}
@@ -403,63 +404,31 @@ func (s *Store) ListDagInstance(input *mod.ListDagInstanceInput) ([]*entity.DagI
 
 // ListTaskInstance
 func (s *Store) ListTaskInstance(input *mod.ListTaskInstanceInput) ([]*entity.TaskInstance, error) {
-	query := bson.M{}
+	db := s.db.Table(s.taskInsClsName)
+
 	if len(input.IDs) > 0 {
-		query["_id"] = bson.M{
-			"$in": input.IDs,
-		}
+		db = db.Where("id in ?", input.IDs)
 	}
+
 	if len(input.Status) > 0 {
-		query["status"] = bson.M{
-			"$in": input.Status,
-		}
+		db = db.Where("status in ?", input.Status)
 	}
+
 	if input.Expired {
-		query["$expr"] = bson.M{
-			"$lte": bson.A{
-				"$updatedAt",
-				bson.M{
-					"$subtract": bson.A{
-						// delay is prevent watch dog conflicted with task's context timeout
-						time.Now().Unix() - 5,
-						"$timeoutSecs",
-					},
-				},
-			},
-		}
+		db = db.Where("updated_at <= (unix_timestamp() - 5) - timeout_secs")
 	}
+
 	if input.DagInsID != "" {
-		query["dagInsId"] = input.DagInsID
-	}
-	opt := &options.FindOptions{}
-	if len(input.SelectField) > 0 {
-		fields := bson.M{}
-		for _, f := range input.SelectField {
-			fields[f] = 1
-		}
-		opt.Projection = fields
+		db = db.Where("dag_ins_id = ?", input.DagInsID)
 	}
 
 	var ret []*entity.TaskInstance
-	err := s.genericList(&ret, s.taskInsClsName, query, opt)
+
+	err := db.Find(&ret).Error
 	if err != nil {
 		return nil, err
 	}
 	return ret, nil
-}
-
-func (s *Store) genericList(ret interface{}, clsName string, query bson.M, opts ...*options.FindOptions) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
-
-	cur, err := s.mongoDb.Collection(clsName).Find(ctx, query, opts...)
-	if err != nil {
-		return fmt.Errorf("find %s failed: %w", clsName, err)
-	}
-	if err := cur.All(ctx, ret); err != nil {
-		return fmt.Errorf("decode failed: %w", err)
-	}
-	return nil
 }
 
 // BatchDeleteDag
@@ -478,14 +447,9 @@ func (s *Store) BatchDeleteTaskIns(ids []string) error {
 }
 
 func (s *Store) genericBatchDelete(ids []string, clsName string) error {
-	ctx, cancel := context.WithTimeout(context.TODO(), s.opt.Timeout)
-	defer cancel()
 
-	_, err := s.mongoDb.Collection(clsName).DeleteMany(ctx, bson.M{
-		"_id": bson.M{
-			"$in": ids,
-		},
-	})
+	err := s.db.Exec(fmt.Sprintf("delete from %s where id in ?", clsName), ids).Error
+
 	if err != nil {
 		return fmt.Errorf("delete failed: %w", err)
 	}
@@ -495,7 +459,7 @@ func (s *Store) genericBatchDelete(ids []string, clsName string) error {
 
 // Marshal
 func (s *Store) Marshal(obj interface{}) ([]byte, error) {
-	return bson.Marshal(obj)
+	return json.Marshal(obj)
 }
 
 // Unmarshal

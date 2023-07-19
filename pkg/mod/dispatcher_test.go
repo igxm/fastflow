@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shiningrush/fastflow/pkg/entity"
-	"github.com/shiningrush/fastflow/pkg/log"
-	"github.com/shiningrush/fastflow/pkg/utils/data"
+	"github.com/igxm/fastflow/pkg/entity"
+	"github.com/igxm/fastflow/pkg/log"
+	"github.com/igxm/fastflow/pkg/utils/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )

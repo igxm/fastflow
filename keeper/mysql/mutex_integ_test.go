@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package mongo
+package mysql
 
 import (
 	"context"

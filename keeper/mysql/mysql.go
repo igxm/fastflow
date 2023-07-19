@@ -1,8 +1,6 @@
-package mongo
+package mysql
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -14,11 +12,8 @@ import (
 	"github.com/igxm/fastflow/pkg/mod"
 	"github.com/igxm/fastflow/store"
 	"github.com/shiningrush/goevent"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
-	"go.mongodb.org/mongo-driver/x/mongo/driver"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 const LeaderKey = "leader"
@@ -30,10 +25,10 @@ type Keeper struct {
 	heartbeatClsName string
 	mutexClsName     string
 
-	leaderFlag  atomic.Value
-	keyNumber   int
-	mongoClient *mongo.Client
-	mongoDb     *mongo.Database
+	leaderFlag atomic.Value
+	keyNumber  int
+
+	db *gorm.DB
 
 	wg            sync.WaitGroup
 	firstInitWg   sync.WaitGroup
@@ -43,11 +38,11 @@ type Keeper struct {
 
 // KeeperOption
 type KeeperOption struct {
+	DB *gorm.DB
 	// Key the work key, must be the format like "xxxx-{{number}}", number is the code of worker
 	Key string
-	// mongo connection string
-	ConnStr  string
-	Database string
+	// mysql connection string
+	Dsn string
 	// the prefix will append to the database
 	Prefix string
 	// UnhealthyTime default 5s, campaign and heartbeat time will be half of it
@@ -73,27 +68,34 @@ func (k *Keeper) Init() error {
 	}
 	store.InitFlakeGenerator(uint16(k.WorkerNumber()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), k.opt.Timeout)
-	defer cancel()
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(k.opt.ConnStr))
-	if err != nil {
-		return fmt.Errorf("connect client failed: %w", err)
+	if k.opt.DB == nil {
+		mysqlConfig := mysql.Config{
+			DSN:                       k.opt.Dsn, // DSN data source name
+			DisableDatetimePrecision:  true,      // 禁用 datetime 精度，MySQL 5.6 之前的数据库不支持
+			SkipInitializeWithVersion: false,     // 根据版本自动配置
+		}
+
+		db, err := gorm.Open(mysql.New(mysqlConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		if err != nil {
+			return err
+		}
+		k.db = db
+
+	} else {
+		k.db = k.opt.DB
 	}
-	err = client.Ping(ctx, readpref.Primary())
-	if err != nil {
-		return fmt.Errorf("ping client failed: %w", err)
-	}
-	k.mongoClient = client
-	k.mongoDb = k.mongoClient.Database(k.opt.Database)
-	if err := k.ensureTtlIndex(ctx, k.leaderClsName, "updatedAt", int32(k.opt.UnhealthyTime.Seconds())); err != nil {
-		return err
-	}
-	if err := k.ensureTtlIndex(ctx, k.heartbeatClsName, "updatedAt", int32(k.opt.UnhealthyTime.Seconds())); err != nil {
-		return err
-	}
-	if err := k.ensureTtlIndex(ctx, k.mutexClsName, "expiredAt", 1); err != nil {
-		return err
-	}
+
+	// if err := k.ensureTtlIndex(ctx, k.leaderClsName, "updatedAt", int32(k.opt.UnhealthyTime.Seconds())); err != nil {
+	// 	return err
+	// }
+	// if err := k.ensureTtlIndex(ctx, k.heartbeatClsName, "updatedAt", int32(k.opt.UnhealthyTime.Seconds())); err != nil {
+	// 	return err
+	// }
+	// if err := k.ensureTtlIndex(ctx, k.mutexClsName, "expiredAt", 1); err != nil {
+	// 	return err
+	// }
 
 	k.firstInitWg.Add(2)
 
@@ -115,42 +117,41 @@ func (k *Keeper) setLeaderFlag(isLeader bool) {
 	})
 }
 
-func (k *Keeper) ensureTtlIndex(ctx context.Context, clsName, field string, ttl int32) error {
-	if _, err := k.mongoDb.Collection(clsName).Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.M{
-			field: 1,
-		},
-		Options: &options.IndexOptions{
-			ExpireAfterSeconds: &ttl,
-		},
-	}); err != nil {
-		isDiffOptErr := false
-		if driverErr, ok := err.(driver.Error); ok {
-			// index already existed and option is different
-			if driverErr.Code == 85 {
-				isDiffOptErr = true
-			}
-		}
-		if !isDiffOptErr {
-			return fmt.Errorf("create index failed: %w", err)
-		}
+// func (k *Keeper) ensureTtlIndex(ctx context.Context, clsName, field string, ttl int32) error {
+// 	if _, err := k.mongoDb.Collection(clsName).Indexes().CreateOne(ctx, mongo.IndexModel{
+// 		Keys: bson.M{
+// 			field: 1,
+// 		},
+// 		Options: &options.IndexOptions{
+// 			ExpireAfterSeconds: &ttl,
+// 		},
+// 	}); err != nil {
+// 		isDiffOptErr := false
+// 		if driverErr, ok := err.(driver.Error); ok {
+// 			// index already existed and option is different
+// 			if driverErr.Code == 85 {
+// 				isDiffOptErr = true
+// 			}
+// 		}
+// 		if !isDiffOptErr {
+// 			return fmt.Errorf("create index failed: %w", err)
+// 		}
 
-		_, err := k.mongoDb.Collection(clsName).Indexes().DropAll(ctx)
-		if err != nil {
-			return fmt.Errorf("drop all index failed: %w", err)
-		}
-		return k.ensureTtlIndex(ctx, clsName, field, ttl)
-	}
-	return nil
-}
+// 		_, err := k.mongoDb.Collection(clsName).Indexes().DropAll(ctx)
+// 		if err != nil {
+// 			return fmt.Errorf("drop all index failed: %w", err)
+// 		}
+// 		return k.ensureTtlIndex(ctx, clsName, field, ttl)
+// 	}
+// 	return nil
+// }
 
 func (k *Keeper) readOpt() error {
-	if k.opt.Key == "" || k.opt.ConnStr == "" {
-		return fmt.Errorf("worker key or connection string can not be empty")
-	}
 
-	if k.opt.Database == "" {
-		k.opt.Database = "fastflow"
+	if k.opt.DB == nil {
+		if k.opt.Dsn == "" {
+			return fmt.Errorf("Dsn string cannot be empty")
+		}
 	}
 	if k.opt.UnhealthyTime == 0 {
 		k.opt.UnhealthyTime = time.Second * 5
@@ -184,20 +185,8 @@ func (k *Keeper) IsLeader() bool {
 
 // AliveNodes get all alive nodes
 func (k *Keeper) AliveNodes() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
-	// mongodb background worker delete expired date every 60s, so can not believe it
-	cur, err := k.mongoDb.Collection(k.heartbeatClsName).Find(ctx, bson.M{
-		"updatedAt": bson.M{
-			"$gt": time.Now().Add(-1 * k.opt.UnhealthyTime),
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("find result failed: %w", err)
-	}
-
 	var ret []Payload
-	if err := cur.All(ctx, &ret); err != nil {
+	if err := k.db.Table(k.heartbeatClsName).Where("updated_at > ?", time.Now().Add(-1*k.opt.UnhealthyTime)).Find(&ret).Error; err != nil {
 		return nil, fmt.Errorf("decode failed: %w", err)
 	}
 
@@ -210,29 +199,16 @@ func (k *Keeper) AliveNodes() ([]string, error) {
 
 // IsAlive check if a worker still alive
 func (k *Keeper) IsAlive(workerKey string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
-
 	var p Payload
 	// mongodb background worker delete expired date every 60s, so can not believe it
-	err := k.mongoDb.Collection(k.heartbeatClsName).FindOne(ctx, bson.M{
-		"_id": workerKey,
-		"updatedAt": bson.M{
-			"$gt": time.Now().Add(-1 * k.opt.UnhealthyTime),
-		},
-	}).Decode(&p)
-	if errors.Is(err, mongo.ErrNoDocuments) {
+	err := k.db.Table(k.heartbeatClsName).Where("id = ? and updated_at > ?", workerKey, time.Now().Add(-1*k.opt.UnhealthyTime)).First(&p).Error
+	if err == gorm.ErrRecordNotFound {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("query mongo failed: %w", err)
+		return false, fmt.Errorf("query failed: %w", err)
 	}
 	return true, nil
-}
-
-// WorkerKey must match `xxxx-1` format
-func (k *Keeper) WorkerKey() string {
-	return k.opt.Key
 }
 
 // WorkerNumber get the the key number of Worker key, if here is a WorkKey like `worker-1`, then it will return "1"
@@ -240,12 +216,17 @@ func (k *Keeper) WorkerNumber() int {
 	return k.keyNumber
 }
 
+// WorkerKey must match `xxxx-1` format
+func (k *Keeper) WorkerKey() string {
+	return k.opt.Key
+}
+
 // NewMutex(key string) create a new distributed mutex
 func (k *Keeper) NewMutex(key string) mod.DistributedMutex {
 	return &MongoMutex{
 		key:     key,
 		clsName: k.mutexClsName,
-		mongoDb: k.mongoDb,
+		db:      k.db,
 	}
 }
 
@@ -254,28 +235,18 @@ func (k *Keeper) Close() {
 	close(k.closeCh)
 	k.wg.Wait()
 
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
 	if k.leaderFlag.Load().(bool) {
-		_, err := k.mongoDb.Collection(k.leaderClsName).DeleteOne(ctx, bson.M{
-			"_id": LeaderKey,
-		})
+		err := k.db.Exec(fmt.Sprintf("delete from %s where id =?", k.leaderClsName), LeaderKey).Error
 		if err != nil {
 			log.Errorf("deregister leader failed: %s", err)
 		}
 	}
 
-	_, err := k.mongoDb.Collection(k.heartbeatClsName).DeleteOne(ctx, bson.M{
-		"_id": k.opt.Key,
-	})
+	err := k.db.Exec(fmt.Sprintf("delete from %s where id =?", k.heartbeatClsName), k.opt.Key).Error
 	if err != nil {
 		log.Errorf("deregister heart beat failed: %s", err)
 	}
 
-	err = k.mongoClient.Disconnect(ctx)
-	if err != nil {
-		log.Errorf("close keeper client failed: %s", err)
-	}
 }
 
 // this function is just for testing
@@ -286,13 +257,13 @@ func (k *Keeper) forceClose() {
 
 // Payload header beat dto
 type Payload struct {
-	WorkerKey string    `bson:"_id"`
+	WorkerKey string    `bson:"_id" gorm:"column:id"`
 	UpdatedAt time.Time `bson:"updatedAt"`
 }
 
 // LeaderPayload leader election dto
 type LeaderPayload struct {
-	ID        string    `bson:"_id"`
+	ID        string    `bson:"_id" gorm:"column:id"`
 	WorkerKey string    `bson:"workerKey"`
 	UpdatedAt time.Time `bson:"updatedAt"`
 }
@@ -331,15 +302,9 @@ func (k *Keeper) elect() {
 }
 
 func (k *Keeper) campaign() error {
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
-	cur, err := k.mongoDb.Collection(k.leaderClsName).Find(ctx, bson.D{})
-	if err != nil {
-		return fmt.Errorf("find data failed: %w", err)
-	}
 	var ret []LeaderPayload
-	if err := cur.All(ctx, &ret); err != nil {
-		return fmt.Errorf("decode data failed: %w", err)
+	if err := k.db.Table(k.leaderClsName).Find(&ret).Error; err != nil {
+		return fmt.Errorf("find data failed: %w", err)
 	}
 
 	if len(ret) > 0 {
@@ -348,38 +313,26 @@ func (k *Keeper) campaign() error {
 			return nil
 		}
 		if ret[0].UpdatedAt.Before(time.Now().Add(-1 * k.opt.UnhealthyTime)) {
-			ret, err := k.mongoDb.Collection(k.leaderClsName).UpdateOne(ctx,
-				bson.M{
-					"_id":       LeaderKey,
-					"workerKey": ret[0].WorkerKey,
-				},
-				bson.M{
-					"$set": bson.M{
-						"workerKey": k.opt.Key,
-						"updatedAt": time.Now(),
-					},
-				})
-			if err != nil {
-				return fmt.Errorf("update failed: %w", err)
+			db := k.db.Table(k.leaderClsName).Where("id = ? and worker_key = ?", LeaderKey, ret[0].WorkerKey).Updates(map[string]any{
+				"worker_key": k.opt.Key,
+				"updated_at": time.Now(),
+			})
+			if db.Error != nil {
+				return fmt.Errorf("update failed: %w", db.Error)
 
 			}
-			if ret.ModifiedCount > 0 {
+			if db.RowsAffected > 0 {
 				k.setLeaderFlag(true)
 			}
 		}
 	}
 	if len(ret) == 0 {
-		_, err := k.mongoDb.Collection(k.leaderClsName).InsertOne(ctx,
-			LeaderPayload{
-				ID:        LeaderKey,
-				WorkerKey: k.opt.Key,
-				UpdatedAt: time.Now(),
-			})
+		err := k.db.Table(k.leaderClsName).Create(&LeaderPayload{
+			ID:        LeaderKey,
+			WorkerKey: k.opt.Key,
+			UpdatedAt: time.Now(),
+		}).Error
 		if err != nil {
-			if mongo.IsDuplicateKeyError(err) {
-				log.Infof("campaign failed")
-				return nil
-			}
 			log.Errorf("insert campaign rec failed: %s", err)
 			return fmt.Errorf("insert failed: %w", err)
 		}
@@ -389,22 +342,13 @@ func (k *Keeper) campaign() error {
 }
 
 func (k *Keeper) continueLeader() error {
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
-	ret, err := k.mongoDb.Collection(k.leaderClsName).UpdateOne(ctx, bson.M{
-		"_id":       LeaderKey,
-		"workerKey": k.opt.Key,
-	},
-		bson.M{
-			"$set": bson.M{
-				"updatedAt": time.Now(),
-			},
-		})
-	if err != nil {
-		return fmt.Errorf("update failed: %w", err)
+
+	ret := k.db.Table(k.leaderClsName).Where("id = ? and worker_key = ?", LeaderKey, k.opt.Key).Update("updated_at", time.Now())
+	if ret.Error != nil {
+		return fmt.Errorf("update failed: %w", ret.Error)
 	}
 
-	if ret.MatchedCount == 0 {
+	if ret.RowsAffected == 0 {
 		return fmt.Errorf("re-elected failed")
 	}
 	return nil
@@ -431,26 +375,28 @@ func (k *Keeper) goHeartBeat() {
 }
 
 func (k *Keeper) heartBeat() error {
-	ctx, cancel := context.WithTimeout(context.TODO(), k.opt.Timeout)
-	defer cancel()
-	_, err := k.mongoDb.Collection(k.heartbeatClsName).UpdateOne(ctx,
-		bson.M{
-			"_id": k.opt.Key,
-		},
-		bson.M{
-			"$set": bson.M{
-				"updatedAt": time.Now(),
-			},
-		},
-		&options.UpdateOptions{
-			Upsert: boolPtr(true),
-		})
+
+	var ret Payload
+	err := k.db.Table(k.heartbeatClsName).Where("id = ?", k.opt.Key).First(&ret).Error
+
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return err
+	}
+
+	if err == gorm.ErrRecordNotFound {
+		if err := k.db.Table(k.heartbeatClsName).Create(&Payload{
+			WorkerKey: k.opt.Key,
+			UpdatedAt: time.Now(),
+		}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	err = k.db.Table(k.heartbeatClsName).Where("id = ?", k.opt.Key).Update("updated_at", time.Now()).Error
 	if err != nil {
-		return fmt.Errorf("update mongo failed: %w", err)
+		return fmt.Errorf("update failed: %w", err)
 	}
 	return nil
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
